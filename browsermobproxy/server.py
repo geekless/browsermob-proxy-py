@@ -113,6 +113,9 @@ class Server(RemoteServer):
         log_path_name = os.path.join(log_path, log_file)
         self.log_file = open(log_path_name, 'w')
 
+        if self._is_listening():
+            raise ProxyServerError("Port already in use: %s" % self.port)
+
         if self.win_env:
             self.process = self._start_on_windows()
         else:
@@ -120,6 +123,12 @@ class Server(RemoteServer):
 
         count = 0
         while not self._is_listening():
+            # FIXME: race condition!
+            # The code should detect the proxy failed to start, but it doesn't.
+            # BrowserMob Proxy (v2.1.4 at least) just hangs when cann't bind to the port,
+            # so self.process.poll() never return True.
+            # We are not able to detect the issue if another process binds to the port
+            # while the proxy process is starting up.
             if self.process.poll():
                 message = (
                     "The Browsermob-Proxy server process failed to start. "
