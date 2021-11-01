@@ -4,6 +4,7 @@ import signal
 import socket
 import subprocess
 import time
+import weakref
 
 import sys
 
@@ -56,6 +57,30 @@ class RemoteServer(object):
 
 class Server(RemoteServer):
 
+    # Wrapper for proper finalization
+    class __FinalizedServer(object):
+        def __init__(self, server):
+            self.win_env = sys.platform == "win32"
+            self.process = None
+            self.log_file = None
+            weakref.finalize(server, self.stop)
+
+        def stop(self):
+            if self.process and self.process.poll() is None:
+                group_pid = os.getpgid(self.process.pid) if not self.win_env else self.process.pid
+                try:
+                    self.process.kill()
+                    self.process.wait()
+                    os.killpg(group_pid, signal.SIGINT)
+                    self.process = None
+                except AttributeError:
+                    # kill may not be available under windows environment
+                    pass
+
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
+
     def __init__(self, path='browsermob-proxy', options=None):
         """
         Initialises a Server object
@@ -65,8 +90,6 @@ class Server(RemoteServer):
             More items will be added in the future.
             This defaults to an empty dictionary
         """
-        self.win_env = sys.platform == "win32"
-
         options = options if options is not None else {}
 
         path_var_sep = ':'
@@ -88,7 +111,8 @@ class Server(RemoteServer):
         self.path = path
         self.host = options.get('host', 'localhost')
         self.port = options.get('port', 8080)
-        self.process = None
+
+        self.fin = Server.__FinalizedServer(self)
 
         if platform.system() == 'Darwin':
             self.command = ['sh']
@@ -111,29 +135,29 @@ class Server(RemoteServer):
         retry_sleep = options.get('retry_sleep', 0.5)
         retry_count = options.get('retry_count', 60)
         log_path_name = os.path.join(log_path, log_file)
-        self.log_file = open(log_path_name, 'w')
+        self.fin.log_file = open(log_path_name, 'w')
 
         if self._is_listening():
             raise ProxyServerError("Port already in use: %s" % self.port)
 
-        if self.win_env:
-            self.process = self._start_on_windows()
+        if self.fin.win_env:
+            self.fin.process = self._start_on_windows()
         else:
-            self.process = self._start_on_unix()
+            self.fin.process = self._start_on_unix()
 
         count = 0
         while not self._is_listening():
             # FIXME: race condition!
             # The code should detect the proxy failed to start, but it doesn't.
             # BrowserMob Proxy (v2.1.4 at least) just hangs when cann't bind to the port,
-            # so self.process.poll() never return True.
+            # so self.fin.process.poll() never return True.
             # We are not able to detect the issue if another process binds to the port
             # while the proxy process is starting up.
-            if self.process.poll():
+            if self.fin.process.poll():
                 message = (
                     "The Browsermob-Proxy server process failed to start. "
                     "Check {0}"
-                    "for a helpful error message.".format(self.log_file))
+                    "for a helpful error message.".format(self.fin.log_file))
 
                 raise ProxyServerError(message)
             time.sleep(retry_sleep)
@@ -145,29 +169,17 @@ class Server(RemoteServer):
     def _start_on_windows(self):
         return subprocess.Popen(self.command,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                                stdout=self.log_file,
+                                stdout=self.fin.log_file,
                                 stderr=subprocess.STDOUT)
 
     def _start_on_unix(self):
         return subprocess.Popen(self.command,
                                 preexec_fn=os.setsid,
-                                stdout=self.log_file,
+                                stdout=self.fin.log_file,
                                 stderr=subprocess.STDOUT)
 
     def stop(self):
         """
         This will stop the process running the proxy
         """
-        if self.process.poll() is not None:
-            return
-
-        group_pid = os.getpgid(self.process.pid) if not self.win_env else self.process.pid
-        try:
-            self.process.kill()
-            self.process.wait()
-            os.killpg(group_pid, signal.SIGINT)
-        except AttributeError:
-            # kill may not be available under windows environment
-            pass
-
-        self.log_file.close()
+        self.fin.stop()
