@@ -111,6 +111,7 @@ class Server(RemoteServer):
         self.path = path
         self.host = options.get('host', 'localhost')
         self.port = options.get('port', 8080)
+        self.proxyPortRange = options.get('proxyPortRange', '8081-8581')
 
         self.fin = Server.__FinalizedServer(self)
 
@@ -118,7 +119,7 @@ class Server(RemoteServer):
             self.command = ['sh']
         else:
             self.command = []
-        self.command += [path, '--port=%s' % self.port]
+        self.command += [path, '--port=%s' % self.port, '--proxyPortRange=%s' % self.proxyPortRange]
 
     def start(self, options=None):
         """
